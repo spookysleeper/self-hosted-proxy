@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 
 $openresty = "nginx.exe"
-$config = "openresty/conf/nginx1.conf"
+$config = "openresty/conf/nginx.conf"
 $root = "."
 
 Write-Host "Starting OpenResty (nginx.exe)..."
