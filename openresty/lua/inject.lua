@@ -4,17 +4,68 @@ local config = require("config")
 local _M = {}
 
 function _M.filter()
-    -- Only process on the last chunk
-    if not ngx.arg[2] then
+    ngx.log(ngx.ERR, "[Inject] Body filter called")
+    
+    -- Only inject into HTML responses
+    local content_type = ngx.header.content_type
+    ngx.log(ngx.ERR, "[Inject] Content-Type: ", content_type or "nil")
+    
+    if not content_type or not string.match(content_type, "text/html") then
+        ngx.log(ngx.ERR, "[Inject] Skipping - not HTML")
         return
     end
 
-    -- Check if we should inject
-    if not config.should_inject() then
+    -- Buffer all chunks in ngx.ctx
+    local chunk = ngx.arg[1]
+    local eof = ngx.arg[2]
+    ngx.ctx.buffered = (ngx.ctx.buffered or "") .. (chunk or "")
+
+    if not eof then
+        ngx.arg[1] = nil  -- Don't send anything yet
         return
     end
 
-    local body = ngx.arg[1]
+    ngx.log(ngx.ERR, "[Inject] Processing final chunk, buffer size: ", #ngx.ctx.buffered)
+
+    local body = ngx.ctx.buffered
+
+    -- Inject a script to patch Pusher/Echo WebSocket host BEFORE any other scripts run
+    -- This MUST be the first script in <head> to intercept WebSocket connections
+    local pusher_patch = [[
+
+<script>
+(function() {
+    console.log('[Proxy] Installing WebSocket patch...');
+    var OriginalWebSocket = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+        var newUrl = url;
+        // Replace localhost:6001 and localhost:6002 with current host
+        if (url.indexOf('localhost:6001') !== -1) {
+            newUrl = url.replace('localhost:6001', window.location.host);
+            console.log('[Proxy] WebSocket URL rewritten:', url, '->', newUrl);
+        } else if (url.indexOf('localhost:6002') !== -1) {
+            newUrl = url.replace('localhost:6002', window.location.host);
+            console.log('[Proxy] WebSocket URL rewritten:', url, '->', newUrl);
+        }
+        if (protocols) {
+            return new OriginalWebSocket(newUrl, protocols);
+        }
+        return new OriginalWebSocket(newUrl);
+    };
+    // Copy static properties
+    for (var prop in OriginalWebSocket) {
+        if (OriginalWebSocket.hasOwnProperty(prop)) {
+            window.WebSocket[prop] = OriginalWebSocket[prop];
+        }
+    }
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
+    console.log('[Proxy] WebSocket patch installed successfully');
+})();
+</script>]]
+    -- Inject the pusher patch as the FIRST thing after <head> opening tag
+    local count
+    body, count = string.gsub(body, "(<head[^>]*>)", "%1" .. pusher_patch, 1)
+    ngx.log(ngx.ERR, "[Inject] WebSocket patch injection count: ", count)
 
     -- Build script tags
     local head_scripts = {}
